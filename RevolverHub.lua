@@ -12,6 +12,18 @@ local CoreGui = game:GetService("CoreGui")
 local Lighting = game:GetService("Lighting")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 
+local function getViewportSize()
+    local camera = Workspace.CurrentCamera
+    return camera and camera.ViewportSize or Vector2.new(1280, 720)
+end
+
+local function isTouchLayout()
+    local viewport = getViewportSize()
+    return UserInputService.TouchEnabled or viewport.X < 700
+end
+
+local IS_MOBILE_UI = isTouchLayout()
+
 local KUKIRIN_PLACE_ID = 122840796290491
 local IS_KUKIRIN = game.PlaceId == KUKIRIN_PLACE_ID
 
@@ -358,6 +370,30 @@ keyCard.BorderSizePixel = 0
 keyCard.Parent = keyBackdrop
 Instance.new("UICorner", keyCard).CornerRadius = UDim.new(0, 16)
 
+local keyCardScale = Instance.new("UIScale")
+keyCardScale.Parent = keyCard
+
+local function updateKeyCardScale()
+    local viewport = getViewportSize()
+    local fit = math.min(1, (viewport.X - 24) / 430, (viewport.Y - 24) / 365)
+    keyCardScale.Scale = math.clamp(fit, 0.52, 1)
+end
+
+updateKeyCardScale()
+local keyCamera = Workspace.CurrentCamera
+if keyCamera then
+    connect(keyCamera:GetPropertyChangedSignal("ViewportSize"), updateKeyCardScale)
+end
+connect(Workspace:GetPropertyChangedSignal("CurrentCamera"), function()
+    task.defer(function()
+        local camera = Workspace.CurrentCamera
+        if camera then
+            connect(camera:GetPropertyChangedSignal("ViewportSize"), updateKeyCardScale)
+        end
+        updateKeyCardScale()
+    end)
+end)
+
 local keyStroke = Instance.new("UIStroke")
 keyStroke.Color = Color3.fromRGB(132, 136, 143)
 keyStroke.Transparency = 0.12
@@ -516,7 +552,7 @@ end
 
 task.spawn(refreshProviderConfig)
 
-connect(providerButtons.lootlabs.MouseButton1Click, function()
+connect(providerButtons.lootlabs.Activated, function()
     keyMessage.Text = "Creating your personal LootLabs link..."
     keyMessage.TextColor3 = Color3.fromRGB(223, 227, 247)
     task.spawn(function()
@@ -599,7 +635,7 @@ local function beginKeySwitch()
     keyMessage.TextColor3 = Color3.fromRGB(143, 151, 177)
     keyBox:CaptureFocus()
 end
-connect(keyButton.MouseButton1Click, submitKey)
+connect(keyButton.Activated, submitKey)
 connect(keyBox.FocusLost, function(enterPressed)
     if enterPressed then
         submitKey()
@@ -1978,6 +2014,7 @@ local Main = make("Frame", {
 addCorner(Main, 18)
 addStroke(Main, COLORS.Accent, 0.22, 1.4)
 local MainScale = make("UIScale", { Scale = UI_SETTINGS.Scale }, Main)
+local MOBILE_RESTORE
 
 local MainShadow = make("ImageLabel", {
     Name = "SoftShadow",
@@ -2079,15 +2116,27 @@ local sidebarHeader = make("TextLabel", {
     TextXAlignment = Enum.TextXAlignment.Left,
 }, Sidebar)
 
-local tabHolder = make("Frame", {
+local tabHolder = make("ScrollingFrame", {
     Position = UDim2.fromOffset(9, 44),
     Size = UDim2.new(1, -18, 0, 300),
     BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 2,
+    ScrollBarImageColor3 = COLORS.Accent,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    ScrollingDirection = Enum.ScrollingDirection.Y,
 }, Sidebar)
 local tabLayout = make("UIListLayout", {
     Padding = UDim.new(0, 7),
     SortOrder = Enum.SortOrder.LayoutOrder,
 }, tabHolder)
+connect(tabLayout:GetPropertyChangedSignal("AbsoluteContentSize"), function()
+    if tabHolder.ScrollingDirection == Enum.ScrollingDirection.X then
+        tabHolder.CanvasSize = UDim2.new(0, tabLayout.AbsoluteContentSize.X + 12, 0, 0)
+    else
+        tabHolder.CanvasSize = UDim2.new(0, 0, 0, tabLayout.AbsoluteContentSize.Y + 12)
+    end
+end)
 
 local sidebarFooter = make("TextLabel", {
     AnchorPoint = Vector2.new(0, 1),
@@ -2198,7 +2247,7 @@ local function createTab(name, symbol, order)
     }, button)
     addCorner(indicator, 3)
 
-    connect(button.MouseButton1Click, function()
+    connect(button.Activated, function()
         showPage(name)
     end)
     connect(button.MouseEnter, function()
@@ -2316,7 +2365,7 @@ local function createToggle(parent, title, configKey, description)
         })
     end
 
-    connect(switch.MouseButton1Click, function()
+    connect(switch.Activated, function()
         CONFIG[configKey] = not CONFIG[configKey]
         refresh()
         log(title .. (CONFIG[configKey] and " enabled" or " disabled"))
@@ -2486,7 +2535,7 @@ local function createButton(parent, title, callback, color)
     connect(button.MouseLeave, function()
         tween(button, 0.13, { BackgroundColor3 = color or COLORS.Accent })
     end)
-    connect(button.MouseButton1Click, callback)
+    connect(button.Activated, callback)
     return button
 end
 
@@ -2740,8 +2789,11 @@ end
 
 createToggle(SettingsPage, "Rainbow accent", "RainbowUI", "Slow animated hue cycling across accent elements")
 createSlider(SettingsPage, "Interface scale", "UIScaleValue", 0.80, 1.20, 0.05)
-createButton(SettingsPage, "Hide / show hub  [RightControl]", function()
+createButton(SettingsPage, "Hide / show hub", function()
     Main.Visible = not Main.Visible
+    if MOBILE_RESTORE then
+        MOBILE_RESTORE.Visible = IS_MOBILE_UI and not Main.Visible
+    end
 end, COLORS.PanelHover)
 createButton(SettingsPage, "RESET INTERFACE SCALE", function()
     CONFIG.UIScaleValue = 1
@@ -2785,9 +2837,12 @@ connect(Top.InputBegan, function(input)
         dragStart = input.Position
         startPosition = Main.Position
     elseif input.UserInputType == Enum.UserInputType.Touch then
-        draggingWindow = true
-        dragStart = input.Position
-        startPosition = Main.Position
+        local rightControlZone = IS_MOBILE_UI and (Top.AbsolutePosition.X + Top.AbsoluteSize.X - 116) or math.huge
+        if not IS_MOBILE_UI or input.Position.X < rightControlZone then
+            draggingWindow = true
+            dragStart = input.Position
+            startPosition = Main.Position
+        end
     end
 end)
 connect(UserInputService.InputChanged, function(input)
@@ -2873,13 +2928,19 @@ local function updateFluentParagraph(paragraph, value)
     return ok
 end
 
+local fluentViewport = getViewportSize()
+local fluentMobile = isTouchLayout()
+local fluentWidth = fluentMobile and math.max(300, math.min(760, fluentViewport.X - 20)) or 760
+local fluentHeight = fluentMobile and math.max(260, math.min(565, fluentViewport.Y - 48)) or 565
+local fluentTabWidth = fluentMobile and math.max(88, math.min(132, math.floor(fluentWidth * 0.28))) or 150
+
 local fluentOk, fluentError = pcall(function()
     Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
     FluentWindow = Fluent:CreateWindow({
         Title = "Revolver Hub",
         SubTitle = "V1.4  •  SECURE LICENSE",
-        TabWidth = 150,
-        Size = UDim2.fromOffset(760, 565),
+        TabWidth = fluentTabWidth,
+        Size = UDim2.fromOffset(fluentWidth, fluentHeight),
         Acrylic = true,
         Theme = "Dark",
         MinimizeKey = Enum.KeyCode.RightControl,
@@ -3101,8 +3162,11 @@ local minimizeButton = make("TextButton", {
     TextSize = 8,
 }, Top)
 addCorner(minimizeButton, 7)
-connect(minimizeButton.MouseButton1Click, function()
+connect(minimizeButton.Activated, function()
     Main.Visible = false
+    if MOBILE_RESTORE then
+        MOBILE_RESTORE.Visible = IS_MOBILE_UI
+    end
 end)
 
 local killButton = make("TextButton", {
@@ -3124,13 +3188,141 @@ end)
 connect(killButton.MouseLeave, function()
     tween(killButton, 0.12, { BackgroundColor3 = Color3.fromRGB(139, 49, 68) })
 end)
-connect(killButton.MouseButton1Click, destroyHub)
+connect(killButton.Activated, destroyHub)
+
+MOBILE_RESTORE = make("TextButton", {
+    Name = "MobileRestore",
+    AnchorPoint = Vector2.new(0, 1),
+    Position = UDim2.new(0, 14, 1, -74),
+    Size = UDim2.fromOffset(48, 48),
+    BackgroundColor3 = COLORS.PanelHover,
+    BorderSizePixel = 0,
+    AutoButtonColor = true,
+    Text = "RH",
+    TextColor3 = COLORS.Text,
+    Font = Enum.Font.GothamBold,
+    TextSize = 14,
+    Visible = false,
+    ZIndex = 100,
+}, GUI)
+addCorner(MOBILE_RESTORE, 14)
+addStroke(MOBILE_RESTORE, COLORS.Accent, 0.15, 1.5)
+connect(MOBILE_RESTORE.Activated, function()
+    Main.Visible = true
+    MOBILE_RESTORE.Visible = false
+end)
+
+local function applyLegacyResponsiveLayout()
+    local viewport = getViewportSize()
+    IS_MOBILE_UI = isTouchLayout()
+
+    if IS_MOBILE_UI then
+        local width = math.max(300, math.min(900, viewport.X - 18))
+        local height = math.max(260, math.min(720, viewport.Y - 36))
+        Main.Size = UDim2.fromOffset(width, height)
+        Main.Position = UDim2.fromScale(0.5, 0.5)
+        MainScale.Scale = math.min(CONFIG.UIScaleValue or 1, 1)
+
+        Top.Size = UDim2.new(1, 0, 0, 60)
+        logo.Position = UDim2.fromOffset(15, 15)
+        logo.Size = UDim2.fromOffset(160, 28)
+        logo.TextSize = 14
+        subtitle.Visible = false
+        statusLabel.Visible = false
+
+        Sidebar.Position = UDim2.fromOffset(10, 66)
+        Sidebar.Size = UDim2.new(1, -20, 0, 48)
+        sidebarHeader.Visible = false
+        sidebarFooter.Visible = false
+        tabHolder.Position = UDim2.fromOffset(4, 4)
+        tabHolder.Size = UDim2.new(1, -8, 1, -8)
+        tabHolder.ScrollingDirection = Enum.ScrollingDirection.X
+        tabHolder.ScrollBarThickness = 2
+        tabLayout.FillDirection = Enum.FillDirection.Horizontal
+        tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+        tabLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+        tabLayout.Padding = UDim.new(0, 6)
+        for name, button in pairs(TabButtons) do
+            button.Size = UDim2.fromOffset(name == "Kukirin Life" and 112 or 94, 38)
+            button.TextSize = 10
+        end
+
+        Content.Position = UDim2.fromOffset(10, 122)
+        Content.Size = UDim2.new(1, -20, 1, -132)
+        minimizeButton.Position = UDim2.new(1, -112, 0.5, 0)
+        minimizeButton.Size = UDim2.fromOffset(48, 26)
+        minimizeButton.TextSize = 8
+        killButton.Position = UDim2.new(1, -58, 0.5, 0)
+        killButton.Size = UDim2.fromOffset(48, 26)
+        killButton.TextSize = 9
+    else
+        Main.Size = UDim2.fromOffset(900, 610)
+        Main.Position = UDim2.fromScale(0.5, 0.5)
+        MainScale.Scale = CONFIG.UIScaleValue or 1
+
+        Top.Size = UDim2.new(1, 0, 0, 70)
+        logo.Position = UDim2.fromOffset(24, 10)
+        logo.Size = UDim2.fromOffset(300, 26)
+        logo.TextSize = 18
+        subtitle.Visible = true
+        statusLabel.Visible = true
+
+        Sidebar.Position = UDim2.fromOffset(14, 82)
+        Sidebar.Size = UDim2.new(0, 184, 1, -96)
+        sidebarHeader.Visible = true
+        sidebarFooter.Visible = true
+        tabHolder.Position = UDim2.fromOffset(9, 44)
+        tabHolder.Size = UDim2.new(1, -18, 0, 300)
+        tabHolder.ScrollingDirection = Enum.ScrollingDirection.Y
+        tabHolder.ScrollBarThickness = 2
+        tabLayout.FillDirection = Enum.FillDirection.Vertical
+        tabLayout.Padding = UDim.new(0, 7)
+        for _, button in pairs(TabButtons) do
+            button.Size = UDim2.new(1, 0, 0, 42)
+            button.TextSize = 11
+        end
+
+        Content.Position = UDim2.fromOffset(210, 82)
+        Content.Size = UDim2.new(1, -224, 1, -96)
+        minimizeButton.Position = UDim2.new(1, -270, 0.5, 0)
+        minimizeButton.Size = UDim2.fromOffset(68, 25)
+        killButton.Position = UDim2.new(1, -190, 0.5, 0)
+        killButton.Size = UDim2.fromOffset(68, 25)
+        MOBILE_RESTORE.Visible = false
+    end
+
+    if tabHolder.ScrollingDirection == Enum.ScrollingDirection.X then
+        tabHolder.CanvasSize = UDim2.new(0, tabLayout.AbsoluteContentSize.X + 12, 0, 0)
+    else
+        tabHolder.CanvasSize = UDim2.new(0, 0, 0, tabLayout.AbsoluteContentSize.Y + 12)
+    end
+end
+
+applyLegacyResponsiveLayout()
+local responsiveCamera = Workspace.CurrentCamera
+if responsiveCamera then
+    connect(responsiveCamera:GetPropertyChangedSignal("ViewportSize"), applyLegacyResponsiveLayout)
+end
+connect(Workspace:GetPropertyChangedSignal("CurrentCamera"), function()
+    task.defer(function()
+        local camera = Workspace.CurrentCamera
+        if camera then
+            connect(camera:GetPropertyChangedSignal("ViewportSize"), applyLegacyResponsiveLayout)
+        end
+        applyLegacyResponsiveLayout()
+    end)
+end)
 
 --// HOTKEY
 if not Fluent then
     connect(UserInputService.InputBegan, function(input, processed)
         if processed then return end
-        if input.KeyCode == Enum.KeyCode.RightControl then Main.Visible = not Main.Visible end
+        if input.KeyCode == Enum.KeyCode.RightControl then
+            Main.Visible = not Main.Visible
+            if MOBILE_RESTORE then
+                MOBILE_RESTORE.Visible = IS_MOBILE_UI and not Main.Visible
+            end
+        end
     end)
 end
 
@@ -3290,7 +3482,7 @@ task.spawn(function()
 
         if CONFIG.UIScaleValue then
             UI_SETTINGS.Scale = CONFIG.UIScaleValue
-            MainScale.Scale = CONFIG.UIScaleValue
+            MainScale.Scale = IS_MOBILE_UI and math.min(CONFIG.UIScaleValue, 1) or CONFIG.UIScaleValue
         end
         if CONFIG.RainbowUI then
             local hue = (os.clock() * 0.055) % 1
